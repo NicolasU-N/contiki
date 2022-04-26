@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2006, Swedish Institute of Computer Science.
+ * Copyright (c) 2007, Swedish Institute of Computer Science.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -32,62 +32,69 @@
 
 /**
  * \file
- *         Header file for Rime's single-hop unicast
+ *         Testing the broadcast layer in Rime
  * \author
  *         Adam Dunkels <adam@sics.se>
  */
 
-/**
- * \addtogroup rime
- * @{
- */
+#ifndef TREE_LIB_H
+#define TREE_LIB_H
 
-/**
- * \defgroup rimeuc Single-hop unicast
- * @{
- *
- * The unicast module sends a packet to an identified single-hop
- * neighbor.  The unicast primitive uses the broadcast primitive and
- * adds the single-hop receiver address attribute to the outgoing
- * packets. For incoming packets, the unicast module inspects the
- * single-hop receiver address attribute and discards the packet if
- * the address does not match the address of the node.
- *
- * \section unicast-channels Channels
- *
- * The unicast module uses 1 channel.
- *
- */
+////////////////////////////
+////////  LIBRARIES  ///////
+////////////////////////////
+#include "contiki.h"
+#include "net/rime/rime.h"
+#include "random.h"
 
-#ifndef UNICAST_H_
-#define UNICAST_H_
+#include "dev/button-sensor.h"
 
-#include "net/rime/broadcast.h"
+#include "dev/leds.h"
 
-struct unicast_conn;
+#include <stdio.h>
+////////////////////////////
+////////  DEFINE  //////////
+////////////////////////////
 
-#define UNICAST_ATTRIBUTES {PACKETBUF_ADDR_RECEIVER, PACKETBUF_ADDRSIZE}, \
-                           {PACKETBUF_ATTR_UNICAST_TYPE, PACKETBUF_ATTR_BYTE}, \
-                           BROADCAST_ATTRIBUTES
+////////////////////////////
+////////  STRUCT  //////////
+////////////////////////////
 
-struct unicast_callbacks
+struct beacon
 {
-  void (*recv)(struct unicast_conn *c, const linkaddr_t *from);
-  void (*sent)(struct unicast_conn *ptr, int status, int num_tx);
+  linkaddr_t id;   // Node id
+  uint16_t rssi_p; // rssi acumulado del padre
 };
 
-struct unicast_conn
+struct node
 {
-  struct broadcast_conn c;
-  const struct unicast_callbacks *u;
+  linkaddr_t preferred_parent;   // Node id
+  uint16_t rssi_p; // rssi acumulado del padre
 };
 
-void unicast_open(struct unicast_conn *c, uint16_t channel,
-                  const struct unicast_callbacks *u);
-void unicast_close(struct unicast_conn *c);
 
-int unicast_send(struct unicast_conn *c, const linkaddr_t *receiver);
+struct preferred_parent
+{
+  struct preferred_parent *next;
+  linkaddr_t id;   // Node id
+  uint16_t rssi_a; // rssi acumulado
 
-#endif /* UNICAST_H_ */
-/** @} */
-/** @} */
+};
+
+struct list_unicast_msg
+{
+  struct list *next;
+  linkaddr_t id;   // Node id
+};
+
+////////////////////////////
+////////  DEF STRUCT  //////
+////////////////////////////
+
+
+////////////////////////////
+////////  FUNCION //////////
+////////////////////////////
+void llenar_beacon(struct beacon *b, linkaddr_t id, uint16_t rssi_p);
+
+#endif /* TREE_LIB_H */
