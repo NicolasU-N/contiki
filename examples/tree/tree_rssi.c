@@ -1,147 +1,109 @@
 /*
- * Copyright (c) 2007, Swedish Institute of Computer Science.
- * All rights reserved.
+ * tree_rssi.c
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
- * 1. Redistributions of source code must retain the above copyright
- *    notice, this list of conditions and the following disclaimer.
- * 2. Redistributions in binary form must reproduce the above copyright
- *    notice, this list of conditions and the following disclaimer in the
- *    documentation and/or other materials provided with the distribution.
- * 3. Neither the name of the Institute nor the names of its contributors
- *    may be used to endorse or promote products derived from this software
- *    without specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE INSTITUTE AND CONTRIBUTORS ``AS IS'' AND
- * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
- * ARE DISCLAIMED.  IN NO EVENT SHALL THE INSTITUTE OR CONTRIBUTORS BE LIABLE
- * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
- * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
- * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
- * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
- * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
- * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
- * SUCH DAMAGE.
- *
- * This file is part of the Contiki operating system.
- *
+ *  Created on: 26/04/2022
+ *      Author: Nicolas
  */
 
-/**
- * \file
- *         CONSTRUCCIÓN DE UN ÁRBOL USANDO EL RSSI
- * \author
- *         nicolas_useche@javeriana.edu.co>
- */
-
+#include "nary_tree.h"
 #include "tree_lib.h"
 #include "net/netstack.h"
+
 /*******************************************************************************
  * Definitions
  ******************************************************************************/
 #define REMOTE 1          // To set the transmission Power
 #define MY_TX_POWER_DBM 7 // This number is in dBm e.g., "0" "7"  "-24"
 
-#define NEG_INF -999
-#define RSSI_NODO_PERDIDO -400
-/*******************************************************************************
- * Prototypes
- ******************************************************************************/
-
 /*******************************************************************************
  * Variables
  ******************************************************************************/
-struct beacon b;
-struct node n;
+beacon_st b; // beacon struct
+node_st n;   // node struct
 
-struct preferred_parent *p; // Para recorrer la lista de posibles padres
-struct list_unicast_msg *l;
+preferred_parent_st *p; // Para recorrer la lista de posibles padres
+list_unicast_msg_st *l;
 
-MEMB(preferred_parent_mem, struct preferred_parent, 30); // LISTA ENLAZADA
+MEMB(preferred_parent_mem, preferred_parent_st, 30); // LISTA ENLAZADA
 LIST(preferred_parent_list);
 
-MEMB(unicast_msg_mem, struct list_unicast_msg, 50);
+MEMB(unicast_msg_mem, list_unicast_msg_st, 30);
 LIST(unicast_msg_list);
 
 PROCESS(enviar_beacon, "Enviar beacons");
+PROCESS(enviar_unicast, "Descubrir vecinos beacons");
 PROCESS(seleccionar_padre, "Seleccionar el mejor padre por RSSI");
-PROCESS(enviar_unicast, "Descubrir vecinos");
-PROCESS(eliminar_ultimo_padre, "Vaciar lista de padres preferidos cada 60sec");
+
+// PROCESS(eliminar_ultimo_padre, "Vaciar lista de padres preferidos cada 60sec");
 PROCESS(retx_unicast_msg, "Retrasmitir mensaje unicast");
 
-AUTOSTART_PROCESSES(&enviar_beacon, &seleccionar_padre, &enviar_unicast, &retx_unicast_msg, &eliminar_ultimo_padre); //
+AUTOSTART_PROCESSES(&enviar_beacon, &seleccionar_padre, &enviar_unicast, &retx_unicast_msg); //,&eliminar_ultimo_padre
 
-/*---------------------------------------------------------------------------*/
+/*******************************************************************************
+ * Callbacks
+ ******************************************************************************/
+static void remove_parent(void *n)
+{
+  preferred_parent_st *e = n;
+  list_remove(preferred_parent_list, e);
+  memb_free(&preferred_parent_mem, e);
+}
+
 static void broadcast_recv(struct broadcast_conn *c, const linkaddr_t *from)
 {
-  void *msg = packetbuf_dataptr(); // msg que llego
-  struct beacon b_recv = *((struct beacon *)msg);
-
-  // RSSI
-  uint16_t last_rssi = packetbuf_attr(PACKETBUF_ATTR_RSSI);
-  uint16_t total_rssi = b_recv.rssi_p + last_rssi;
-
-  struct preferred_parent *in_l; // in to list
+  beacon_st b_recv;
 
   if (linkaddr_node_addr.u8[0] != 1) // Si no es el nodo raiz
   {
+    void *msg = packetbuf_dataptr();
+    b_recv = *((beacon_st *)msg);
+
+    // RSSI
+    signed int last_rssi = packetbuf_attr(PACKETBUF_ATTR_RSSI);
+    signed int total_rssi = b_recv.rssi_p + last_rssi;
+
     printf("RSSI recived from NODE ID %d = '%d'. TOTAL RSSI=%d\n", b_recv.id.u8[0], b_recv.rssi_p, total_rssi);
 
     // LISTA
     // Revisar si ya conozco este posible padre
-    for (p = list_head(preferred_parent_list); p != NULL; p = list_item_next(p))
+    for (p = list_head(preferred_parent_list); p != NULL; p = p->next)
     {
       // We break out of the loop if the address of the neighbor matches
       // the address of the neighbor from which we received this
       // broadcast message.
-      if (linkaddr_cmp(&p->id, &b_recv.id))
+      if (linkaddr_cmp(from, &p->id))
       {
         // YA estaba en la lista ACTUALIZAR
-        p->rssi_a = b_recv.rssi_p + last_rssi; // Guardo del rssi. El rssi es igual al rssi_path + rssi del broadcast
+        p->rssi_a = total_rssi; // Guardo del rssi. El rssi es igual al rssi_path + rssi del broadcast
         // printf("beacon updated to list with RSSI_A = %d\n", p->rssi_a);
-        break;
+        ctimer_set(&p->ctimer, PARENT_TIMEOUT, remove_parent, P);
+        process_post(&seleccionar_padre, PROCESS_EVENT_CONTINUE, NULL);
+        return;
       }
     }
 
+    p = memb_alloc(&preferred_parent_mem);
     // Si no conocia este posible padre
-    if (p == NULL)
+    if (p != NULL)
     {
-      // ADD to the listcall
-      in_l = memb_alloc(&preferred_parent_mem);
-      if (in_l == NULL)
-      { // If we could not allocate a new entry, we give up.
-        printf("ERROR: we could not allocate a new entry for <<preferred_parent_list>> in tree_rssi\n");
-      }
-      else
-      {
-        // Guardo los campos del mensaje
-        in_l->id = b_recv.id; // Guardo el id del nodo
-        // rssi_ac es el rssi del padre + el rssi del enlace al padre
-        in_l->rssi_a = b_recv.rssi_p + last_rssi; // Guardo del rssi acumulado. El rssi acumulado es el rssi divulgado por el nodo (rssi_path) + el rssi medido del beacon que acaba de llegar (rss)
-        list_push(preferred_parent_list, in_l);   // Add an item to the start of the list.
-        // printf("beacon added to list: id = %d rssi_a = %d\n", in_l->id.u8[0], in_l->rssi_a);
-      }
+      list_add(preferred_parent_list,p);
+      linkaddr_copy(&p->id, &b_recv.id) // Guardo el id del nodo            
+      p->rssi_a = total_rssi; // Guardo del rssi acumulado. El rssi acumulado es el rssi divulgado por el nodo (rssi_path) + el rssi medido del beacon que acaba de llegar (rssi)
+      ctimer_set(&p->ctimer, PARENT_TIMEOUT, remove_parent, P);
+      process_post(&seleccionar_padre, PROCESS_EVENT_CONTINUE, NULL);
     }
-    // printf("BEACON RECIBIDO ID =%d rssi_p=%d\n", from->u8[0], b_recv.rssi_p);
-    process_post(&seleccionar_padre, PROCESS_EVENT_CONTINUE, NULL);
   }
 }
-/*---------------------------------------------------------------------------*/
 
-/*---------------------------------------------------------------------------*/
 static void unicast_recv(struct unicast_conn *c, const linkaddr_t *from)
 {
-  void *msg = packetbuf_dataptr(); // msg que llego
+  void *msg = packetbuf_dataptr();
   linkaddr_t uc_recv = *((linkaddr_t *)msg);
   printf("received from id=%d\n", uc_recv.u8[0]);
 
   if (linkaddr_node_addr.u8[0] != 1) // Si no es el nodo raiz
   {
     l = memb_alloc(&unicast_msg_mem);
-
     if (l != NULL)
     {
       list_add(unicast_msg_list, l);
@@ -150,23 +112,21 @@ static void unicast_recv(struct unicast_conn *c, const linkaddr_t *from)
     process_post(&retx_unicast_msg, PROCESS_EVENT_CONTINUE, NULL);
   }
 }
-/*---------------------------------------------------------------------------*/
 
-/*---------------------------------------------------------------------------*/
 static const struct broadcast_callbacks broadcast_callbacks = {broadcast_recv};
 static struct broadcast_conn broadcast;
 
 static const struct unicast_callbacks unicast_callbacks = {unicast_recv};
 static struct unicast_conn unicast;
 
-/*---------------------------------------------------------------------------*/
-
-/*---------------------------------------------------------------------------*/
+/*******************************************************************************
+ * Processes
+ ******************************************************************************/
 PROCESS_THREAD(seleccionar_padre, ev, data)
 {
   PROCESS_BEGIN();
 
-  struct preferred_parent *p; // Para recorrer la lista de posibles padres
+  preferred_parent_st *p;
   uint16_t lowest_rssi;
   linkaddr_t new_parent;
 
@@ -212,9 +172,7 @@ PROCESS_THREAD(seleccionar_padre, ev, data)
   }
   PROCESS_END();
 }
-/*---------------------------------------------------------------------------*/
 
-/*---------------------------------------------------------------------------*/
 PROCESS_THREAD(enviar_unicast, ev, data)
 {
   static struct etimer et;
@@ -242,9 +200,8 @@ PROCESS_THREAD(enviar_unicast, ev, data)
   PROCESS_END();
 }
 
-/*---------------------------------------------------------------------------*/
-
 /*PROCESO POR TIMER-----------------------------------------------------------*/
+/*
 PROCESS_THREAD(eliminar_ultimo_padre, ev, data)
 {
   static struct etimer et;
@@ -276,9 +233,9 @@ PROCESS_THREAD(eliminar_ultimo_padre, ev, data)
   }
   PROCESS_END();
 }
+*/
 /*---------------------------------------------------------------------------*/
 
-/*---------------------------------------------------------------------------*/
 PROCESS_THREAD(retx_unicast_msg, ev, data)
 {
   PROCESS_EXITHANDLER(unicast_close(&unicast);)
@@ -302,8 +259,6 @@ PROCESS_THREAD(retx_unicast_msg, ev, data)
   }
   PROCESS_END();
 }
-
-/*---------------------------------------------------------------------------*/
 
 PROCESS_THREAD(enviar_beacon, ev, data)
 {
@@ -336,8 +291,9 @@ PROCESS_THREAD(enviar_beacon, ev, data)
 
   broadcast_open(&broadcast, 129, &broadcast_callbacks);
 
+  // Si es el nodo padre
   if (linkaddr_node_addr.u8[0] == 1)
-  { // Si es el nodo padre
+  {
     n.rssi_p = 0;
   }
   else
@@ -359,10 +315,9 @@ PROCESS_THREAD(enviar_beacon, ev, data)
 
     llenar_beacon(&b, linkaddr_node_addr, n.rssi_p);
 
-    packetbuf_copyfrom(&b, sizeof(struct beacon));
+    packetbuf_copyfrom(&b, sizeof(beacon_st));
     broadcast_send(&broadcast);
   }
 
   PROCESS_END();
 }
-/*---------------------------------------------------------------------------*/

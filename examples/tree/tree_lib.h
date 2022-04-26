@@ -1,97 +1,75 @@
 /*
- * Copyright (c) 2007, Swedish Institute of Computer Science.
- * All rights reserved.
+ * tree_lib.h
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
- * 1. Redistributions of source code must retain the above copyright
- *    notice, this list of conditions and the following disclaimer.
- * 2. Redistributions in binary form must reproduce the above copyright
- *    notice, this list of conditions and the following disclaimer in the
- *    documentation and/or other materials provided with the distribution.
- * 3. Neither the name of the Institute nor the names of its contributors
- *    may be used to endorse or promote products derived from this software
- *    without specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE INSTITUTE AND CONTRIBUTORS ``AS IS'' AND
- * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
- * ARE DISCLAIMED.  IN NO EVENT SHALL THE INSTITUTE OR CONTRIBUTORS BE LIABLE
- * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
- * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
- * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
- * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
- * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
- * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
- * SUCH DAMAGE.
- *
- * This file is part of the Contiki operating system.
- *
- */
-
-/**
- * \file
- *         Testing the broadcast layer in Rime
- * \author
- *         Adam Dunkels <adam@sics.se>
+ *  Created on: 26/04/2022
+ *      Author: Nicolas
  */
 
 #ifndef TREE_LIB_H
 #define TREE_LIB_H
 
-////////////////////////////
-////////  LIBRARIES  ///////
-////////////////////////////
 #include "contiki.h"
 #include "net/rime/rime.h"
 #include "random.h"
-#include "dev/button-sensor.h"
-#include "dev/leds.h"
+#include "lib/list.h"
+#include "lib/memb.h"
+//#include "dev/button-sensor.h"
+//#include "dev/leds.h"
 #include <stdio.h>
-////////////////////////////
-////////  DEFINE  //////////
-////////////////////////////
 
-////////////////////////////
-////////  STRUCT  //////////
-////////////////////////////
+/*******************************************************************************
+ * Definitions
+ ******************************************************************************/
+#define NEG_INF           -999
+#define RSSI_NODO_PERDIDO -400
+#define PARENT_TIMEOUT  60 * CLOCK_SECOND
 
-struct beacon
+#define U_DATA_ATTR     0x01
+#define U_CONTROL_ATTR  0x02
+
+#define ORIGIN  3
+#define DEST    20
+/*******************************************************************************
+ * Variables
+ ******************************************************************************/
+typedef struct beacon_st beacon_st;
+
+typedef struct node_st node_st;
+
+typedef struct preferred_parent_st preferred_parent_st;
+
+typedef struct list_unicast_msg_st list_unicast_msg_st;
+
+
+struct beacon_st
 {
   linkaddr_t id;   // Node id
   uint16_t rssi_p; // rssi acumulado del padre
 };
 
-struct node
+struct node_st
 {
-  linkaddr_t preferred_parent;   // Node id
+  linkaddr_t preferred_parent_st;   // Node id
   uint16_t rssi_p; // rssi acumulado del padre
 };
 
-
-struct preferred_parent
+struct preferred_parent_st
 {
-  struct preferred_parent *next;
+  struct preferred_parent_st *next;
   linkaddr_t id;   // Node id
-  uint16_t rssi_a; // rssi acumulado
-  //struct ctimer ctimer;
+  signed int rssi_a; // rssi acumulado
+  struct ctimer ctimer;
 };
 
-struct list_unicast_msg
+struct list_unicast_msg_st
 {
   struct list *next;
   linkaddr_t id;   // Node id
 };
 
-////////////////////////////
-////////  DEF STRUCT  //////
-////////////////////////////
-
-
-////////////////////////////
-////////  FUNCION //////////
-////////////////////////////
+/*******************************************************************************
+ * Prototypes
+ ******************************************************************************/
 void llenar_beacon(struct beacon *b, linkaddr_t id, uint16_t rssi_p);
 
 #endif /* TREE_LIB_H */
