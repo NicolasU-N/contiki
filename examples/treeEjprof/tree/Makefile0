@@ -1,0 +1,13 @@
+CONTIKI = ../..
+
+all: example-abc example-mesh example-collect example-trickle example-polite \
+     example-rudolph1 example-rudolph2 example-rucb \
+     example-runicast example-unicast example-neighbors
+
+$(info MY_TX_POWER_DBM is ${MY_TX_POWER_DBM})
+
+CFLAGS += -DMY_TX_POWER_DBM=${MY_TX_POWER_DBM}
+
+
+CONTIKI_WITH_RIME = 1
+include $(CONTIKI)/Makefile.include
