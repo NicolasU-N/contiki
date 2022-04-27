@@ -11,8 +11,8 @@
 #include "contiki.h"
 #include "net/rime/rime.h"
 #include "random.h"
-#include "lib/list.h"
-#include "lib/memb.h"
+//#include "lib/list.h"
+//#include "lib/memb.h"
 //#include "dev/button-sensor.h"
 //#include "dev/leds.h"
 #include <stdio.h>
@@ -21,13 +21,15 @@
  * Definitions
  ******************************************************************************/
 #define NEG_INF           -999
-#define RSSI_NODO_PERDIDO -400
+//#define RSSI_NODO_PERDIDO -400
 #define PARENT_TIMEOUT  60 * CLOCK_SECOND
+
+#define STABLE_TIME 10 //sec
 
 #define U_DATA_ATTR     0x01
 #define U_CONTROL_ATTR  0x02
 
-#define ORIGIN  3
+#define ORIGIN  9
 #define DEST    20
 /*******************************************************************************
  * Variables
@@ -50,7 +52,8 @@ struct beacon_st
 struct node_st
 {
   linkaddr_t preferred_parent;   // Node id
-  uint16_t rssi_p; // rssi acumulado del padre
+  signed int rssi_p; // rssi acumulado del padre
+  char tree_ch[128]; //arbol codificado
 };
 
 struct preferred_parent_st
@@ -64,7 +67,7 @@ struct preferred_parent_st
 struct list_unicast_msg_st
 {
   struct list *next;
-  linkaddr_t id;   // Node id
+  char tree_ch[32];   // Node id
 };
 
 /*******************************************************************************

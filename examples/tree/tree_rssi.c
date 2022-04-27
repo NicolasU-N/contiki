@@ -13,7 +13,7 @@
  * Definitions
  ******************************************************************************/
 #define REMOTE 1          // To set the transmission Power
-#define MY_TX_POWER_DBM 7 // This number is in dBm e.g., "0" "7"  "-24"
+#define MY_TX_POWER_DBM 0 // This number is in dBm e.g., "0" "7"  "-24"
 
 /*******************************************************************************
  * Variables
@@ -23,23 +23,27 @@ char *ptr;
 beacon_st b; // beacon struct
 node_st n;   // node struct
 
-preferred_parent_st *p; // Para recorrer la lista de posibles padres
+tree_node_st *tree_node; // tree node struct
+
+preferred_parent_st *p; // lista de posibles padres
 list_unicast_msg_st *l;
 
-MEMB(preferred_parent_mem, preferred_parent_st, 30); // LISTA ENLAZADA
+//---LINKED LISTS
+MEMB(preferred_parent_mem, preferred_parent_st, 30);
 LIST(preferred_parent_list);
-
-MEMB(unicast_msg_mem, list_unicast_msg_st, 30);
+MEMB(unicast_msg_mem, list_unicast_msg_st, 50);
 LIST(unicast_msg_list);
+//---
 
-PROCESS(enviar_beacon, "Enviar beacons");
-PROCESS(enviar_unicast, "Descubrir vecinos beacons");
-PROCESS(seleccionar_padre, "Seleccionar el mejor padre por RSSI");
+PROCESS(send_beacon, "Enviar beacons");
+PROCESS(select_parent, "Seleccionar el mejor padre por RSSI");
+PROCESS(send_routing_table, "Enviar tabla de enrutamiento");
+PROCESS(update_routing_table, "Actualizar tabla de enrutamiento");
+PROCESS(generate_pkg, "Generar paquetes al destino");
+PROCESS(routing, "Enrutamiento Upstream/Downstream");
 
-// PROCESS(eliminar_ultimo_padre, "Vaciar lista de padres preferidos cada 60sec");
-PROCESS(retx_unicast_msg, "Retrasmitir mensaje unicast");
-
-AUTOSTART_PROCESSES(&enviar_beacon, &seleccionar_padre, &enviar_unicast, &retx_unicast_msg); //,&eliminar_ultimo_padre
+// PROCESS(retx_unicast_msg, "Retrasmitir mensaje unicast");
+AUTOSTART_PROCESSES(&send_beacon, &select_parent, &send_routing_table, &update_routing_table, &generate_pkg, &routing); //, &retx_unicast_msg
 
 /*******************************************************************************
  * Callbacks
@@ -64,7 +68,7 @@ static void broadcast_recv(struct broadcast_conn *c, const linkaddr_t *from)
     signed int last_rssi = packetbuf_attr(PACKETBUF_ATTR_RSSI);
     signed int total_rssi = b_recv.rssi_p + last_rssi;
 
-    printf("RSSI recived from NODE ID %d = '%d'. TOTAL RSSI=%d\n", b_recv.id.u8[0], b_recv.rssi_p, total_rssi);
+    printf("RSSI from NODE ID %d = %d. T RSSI=%d\n", b_recv.id.u8[0], b_recv.rssi_p, total_rssi);
 
     // LISTA
     // Revisar si ya conozco este posible padre
@@ -79,7 +83,7 @@ static void broadcast_recv(struct broadcast_conn *c, const linkaddr_t *from)
         p->rssi_a = total_rssi; // Guardo del rssi. El rssi es igual al rssi_path + rssi del broadcast
         // printf("beacon updated to list with RSSI_A = %d\n", p->rssi_a);
         ctimer_set(&p->ctimer, PARENT_TIMEOUT, remove_parent, p);
-        process_post(&seleccionar_padre, PROCESS_EVENT_CONTINUE, NULL);
+        process_post(&select_parent, PROCESS_EVENT_CONTINUE, NULL);
         return;
       }
     }
@@ -92,27 +96,41 @@ static void broadcast_recv(struct broadcast_conn *c, const linkaddr_t *from)
       linkaddr_copy(&p->id, &b_recv.id); // Guardo el id del nodo
       p->rssi_a = total_rssi;            // Guardo del rssi acumulado. El rssi acumulado es el rssi divulgado por el nodo (rssi_path) + el rssi medido del beacon que acaba de llegar (rssi)
       ctimer_set(&p->ctimer, PARENT_TIMEOUT, remove_parent, p);
-      process_post(&seleccionar_padre, PROCESS_EVENT_CONTINUE, NULL);
+      process_post(&select_parent, PROCESS_EVENT_CONTINUE, NULL);
     }
   }
 }
 
 static void unicast_recv(struct unicast_conn *c, const linkaddr_t *from)
 {
-  void *msg = packetbuf_dataptr();
-  linkaddr_t uc_recv = *((linkaddr_t *)msg);
-  printf("msg from id=%d\n", uc_recv.u8[0]);
+  packetbuf_attr_t uc_type = packetbuf_attr(PACKETBUF_ATTR_UNICAST_TYPE); // Obtener el tipo de paquete
 
-  if (linkaddr_node_addr.u8[0] != 1) // Si no es el nodo raiz
+  void *msg = packetbuf_dataptr();
+
+  if (uc_type == U_CONTROL_ATTR)
   {
+    printf("PKG TYPE CTRL\n");
+    char *rcv = (char *)msg; // leer mensaje  *((char *)msg)
+
+    process_post(&update_routing_table, PROCESS_EVENT_CONTINUE, rcv);
+  }
+  else if (uc_type == U_DATA_ATTR)
+  {
+    printf("PKG TYPE DATA\n");
+    list_unicast_msg_st uc_recv_data = *((list_unicast_msg_st *)msg); // leer mensaje de datos como lista enlazada
+
     l = memb_alloc(&unicast_msg_mem);
     if (l != NULL)
     {
       list_add(unicast_msg_list, l);
-      linkaddr_copy(&l->id, &uc_recv); // Set message id
+      strcpy(l->tree_ch, uc_recv_data.tree_ch); // set message
+      // printf("PKG UNICAST R=%s", l->tree_ch);
     }
-    process_post(&retx_unicast_msg, PROCESS_EVENT_CONTINUE, NULL);
+
+    process_post(&routing, PROCESS_EVENT_CONTINUE, NULL);
   }
+
+  // printf("msg from id=%d\n", uc_recv.u8[0]);
 }
 
 static const struct broadcast_callbacks broadcast_callbacks = {broadcast_recv};
@@ -124,7 +142,70 @@ static struct unicast_conn unicast;
 /*******************************************************************************
  * Processes
  ******************************************************************************/
-PROCESS_THREAD(seleccionar_padre, ev, data)
+
+PROCESS_THREAD(send_beacon, ev, data)
+{
+  static struct etimer et;
+
+  PROCESS_EXITHANDLER(broadcast_close(&broadcast);)
+
+  PROCESS_BEGIN();
+
+//-------------------------------- RADIO ------------------------------------
+// Set Transmission Power in the Zolertia
+#if REMOTE
+  static radio_value_t val;
+  if (NETSTACK_RADIO.set_value(RADIO_PARAM_TXPOWER, MY_TX_POWER_DBM) ==
+      RADIO_RESULT_OK)
+  {
+    NETSTACK_RADIO.get_value(RADIO_PARAM_TXPOWER, &val);
+    printf("Transmission Power Set : %d dBm\n", val);
+  }
+  else if (NETSTACK_RADIO.set_value(RADIO_PARAM_TXPOWER, MY_TX_POWER_DBM) ==
+           RADIO_RESULT_INVALID_VALUE)
+  {
+    printf("ERROR: RADIO_RESULT_INVALID_VALUE\n");
+  }
+  else
+  {
+    printf("ERROR: The TX power could not be set\n");
+  }
+#endif
+
+  broadcast_open(&broadcast, 129, &broadcast_callbacks);
+
+  // Si es el nodo padre
+  if (linkaddr_node_addr.u8[0] == 1)
+  {
+    n.rssi_p = 0;
+  }
+  else
+  {
+    n.rssi_p = NEG_INF;
+  }
+
+  tree_node = new_node(linkaddr_node_addr.u8[0]);
+
+  while (1)
+  {
+    /* Delay 2-4 seconds */
+    etimer_set(&et, CLOCK_SECOND * 4 + random_rand() % (CLOCK_SECOND * 4) - 300); // 1 3
+
+    PROCESS_WAIT_EVENT_UNTIL(etimer_expired(&et));
+
+    // printf("n.preferred_parent.u8 %d\n", n.preferred_parent.u8[0]);
+    // printf("TX n.rssi_p %d\n", n.rssi_p);
+
+    llenar_beacon(&b, linkaddr_node_addr, n.rssi_p);
+
+    packetbuf_copyfrom(&b, sizeof(beacon_st));
+    broadcast_send(&broadcast);
+  }
+
+  PROCESS_END();
+}
+
+PROCESS_THREAD(select_parent, ev, data)
 {
   PROCESS_BEGIN();
 
@@ -175,9 +256,9 @@ PROCESS_THREAD(seleccionar_padre, ev, data)
   PROCESS_END();
 }
 
-PROCESS_THREAD(enviar_unicast, ev, data)
+PROCESS_THREAD(send_routing_table, ev, data)
 {
-  static struct etimer et;
+  static struct etimer et, wait;
 
   PROCESS_EXITHANDLER(unicast_close(&unicast);)
 
@@ -185,141 +266,128 @@ PROCESS_THREAD(enviar_unicast, ev, data)
 
   unicast_open(&unicast, 146, &unicast_callbacks);
 
+  etimer_set(&wait, CLOCK_SECOND * STABLE_TIME);
+  PROCESS_WAIT_EVENT_UNTIL(etimer_expired(&wait));
+
   while (1)
   {
-    etimer_set(&et, CLOCK_SECOND * 8 + random_rand() % (CLOCK_SECOND * 4));
-
+    etimer_set(&et, CLOCK_SECOND * 4 + random_rand() % (CLOCK_SECOND * 4));
     PROCESS_WAIT_EVENT_UNTIL(etimer_expired(&et));
 
-    packetbuf_copyfrom(&b.id, sizeof(linkaddr_t)); // beacon id
+    serialize(tree_node, n.tree_ch); // Serializar arbol
+    printf("SERIAL=%s\n", n.tree_ch);
 
-    if (n.rssi_p > RSSI_NODO_PERDIDO) // valor rssi promedio cuando no se encuentra conectado al nodo raiz
+    packetbuf_copyfrom(&n.tree_ch, strlen(n.tree_ch)); // enviar arbol codificado
+
+    if (!linkaddr_cmp(&n.preferred_parent, &linkaddr_null))
     {
-      // printf("ENVIANDO UNICAST\n");
-      unicast_send(&unicast, &n.preferred_parent);
+    packetbuf_set_attr(PACKETBUF_ATTR_UNICAST_TYPE, U_CONTROL_ATTR);
+    if (unicast_send(&unicast, &n.preferred_parent))
+    {
+      printf("ENVIO UNICAST=%s\n", n.tree_ch);
     }
+    // unicast_send(&unicast, &n.preferred_parent);
+     }
   }
   PROCESS_END();
 }
 
-/*PROCESO POR TIMER-----------------------------------------------------------*/
-/*
-PROCESS_THREAD(eliminar_ultimo_padre, ev, data)
+PROCESS_THREAD(update_routing_table, ev, data)
 {
-  static struct etimer et;
+  PROCESS_BEGIN();
+  while (1)
+  {
+    PROCESS_YIELD();
+
+    char *rcv = (char *)data;
+    printf("data recv=%s\n", rcv);
+
+    deserialize(tree_node, rcv); // Deserializar arbol
+    ptr = 0;                     // reset ptr deserializer
+    //------------
+    char serial_test[128]; // Verificar que la deserializacion sea correcta
+    serialize(tree_node, serial_test);
+    printf("ENRU ACT=%s\n", serial_test);
+    //------------
+  }
+  PROCESS_END();
+}
+
+PROCESS_THREAD(generate_pkg, ev, data)
+{
+  static struct etimer et, wait;
 
   PROCESS_BEGIN();
 
+  etimer_set(&wait, CLOCK_SECOND * STABLE_TIME);
+  PROCESS_WAIT_EVENT_UNTIL(etimer_expired(&wait));
+
   while (1)
   {
-    etimer_set(&et, CLOCK_SECOND * 60);
+    etimer_set(&et, CLOCK_SECOND * 4 + random_rand() % (CLOCK_SECOND * 4));
 
     PROCESS_WAIT_EVENT_UNTIL(etimer_expired(&et));
 
-    if (list_length(preferred_parent_st_list) > 1)
+    if (linkaddr_node_addr.u8[0] == ORIGIN)
     {
-      // printf("ELIMINANDO ULTIMO OBJETO DE LA LISTA \n");
-      // recorrer la LISTA ELIMINANDO ULTIMO OBJETO DE LA LISTA
-      for (p = list_head(preferred_parent_st_list); p != NULL; p = list_item_next(p))
+      l = memb_alloc(&unicast_msg_mem);
+      if (l != NULL)
       {
-        if (list_item_next(p) == NULL)
-        {
-          // printf("ULTIMO EN LA LISTA ID=%d RSSI_A = %d \n", p->id.u8[0], p->rssi_a);
-          list_remove(preferred_parent_st_list, p);
-          memb_free(&preferred_parent_st_mem, p);
-          break;
-        }
+        list_add(unicast_msg_list, l);
+        strcpy(l->tree_ch, "Datos"); // set message
+        printf("MSG=%s\n", l->tree_ch);
       }
-      // printf("-------\n");
+      process_post(&routing, PROCESS_EVENT_CONTINUE, NULL);
+      // printf("Paquete generado\n");
     }
   }
   PROCESS_END();
 }
-*/
-/*---------------------------------------------------------------------------*/
 
-PROCESS_THREAD(retx_unicast_msg, ev, data)
+PROCESS_THREAD(routing, ev, data)
 {
   PROCESS_EXITHANDLER(unicast_close(&unicast);)
 
   PROCESS_BEGIN();
 
   unicast_open(&unicast, 146, &unicast_callbacks);
+
+  int send_to = 0;
+  linkaddr_t node_dest;
+  node_dest.u8[1] = 0;
 
   while (1)
   {
     PROCESS_YIELD();
 
-    if (n.rssi_p > RSSI_NODO_PERDIDO)
+    send_to = search_forwarder(tree_node, DEST);
+
+    node_dest.u8[1] = (unsigned char)send_to;
+
+    printf("#A color=orange\n"); // orange
+
+    for (l = list_head(unicast_msg_list); l != NULL; l = l->next)
     {
-      l = list_head(unicast_msg_list);
-      packetbuf_copyfrom(&l->id, sizeof(linkaddr_t));
-      unicast_send(&unicast, &n.preferred_parent);
-      list_remove(unicast_msg_list, l);
-      memb_free(&unicast_msg_mem, l);
+      packetbuf_copyfrom(&l, sizeof(list_unicast_msg_st));
+      packetbuf_set_attr(PACKETBUF_ATTR_UNICAST_TYPE, U_DATA_ATTR);
+
+      if (linkaddr_node_addr.u8[0] == DEST)
+      {
+        printf("MSG Recived =%s\n", l->tree_ch);
+        break;
+      }
+      else
+      {
+        if (send_to == 0)
+        { // enviar al padre
+          unicast_send(&unicast, &n.preferred_parent);
+        }
+        else
+        { // enviar al nodo hijo
+          unicast_send(&unicast, &node_dest);
+        }
+      }
     }
   }
-  PROCESS_END();
-}
-
-PROCESS_THREAD(enviar_beacon, ev, data)
-{
-  static struct etimer et;
-
-  PROCESS_EXITHANDLER(broadcast_close(&broadcast);)
-
-  PROCESS_BEGIN();
-
-//-------------------------------- RADIO ------------------------------------
-// Set Transmission Power in the Zolertia
-#if REMOTE
-  static radio_value_t val;
-  if (NETSTACK_RADIO.set_value(RADIO_PARAM_TXPOWER, MY_TX_POWER_DBM) ==
-      RADIO_RESULT_OK)
-  {
-    NETSTACK_RADIO.get_value(RADIO_PARAM_TXPOWER, &val);
-    printf("Transmission Power Set : %d dBm\n", val);
-  }
-  else if (NETSTACK_RADIO.set_value(RADIO_PARAM_TXPOWER, MY_TX_POWER_DBM) ==
-           RADIO_RESULT_INVALID_VALUE)
-  {
-    printf("ERROR: RADIO_RESULT_INVALID_VALUE\n");
-  }
-  else
-  {
-    printf("ERROR: The TX power could not be set\n");
-  }
-#endif
-
-  broadcast_open(&broadcast, 129, &broadcast_callbacks);
-
-  // Si es el nodo padre
-  if (linkaddr_node_addr.u8[0] == 1)
-  {
-    n.rssi_p = 0;
-  }
-  else
-  {
-    n.rssi_p = NEG_INF;
-  }
-
-  while (1)
-  {
-    /* Delay 2-4 seconds */
-    etimer_set(&et, (CLOCK_SECOND * 4 + random_rand() % (CLOCK_SECOND * 4)) - 300); // 1 3
-
-    // etimer_set(&et, CLOCK_SECOND * 3);
-
-    PROCESS_WAIT_EVENT_UNTIL(etimer_expired(&et));
-
-    // printf("n.preferred_parent.u8 %d\n", n.preferred_parent.u8[0]);
-    // printf("TX n.rssi_p %d\n", n.rssi_p);
-
-    llenar_beacon(&b, linkaddr_node_addr, n.rssi_p);
-
-    packetbuf_copyfrom(&b, sizeof(beacon_st));
-    broadcast_send(&broadcast);
-  }
-
   PROCESS_END();
 }
