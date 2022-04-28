@@ -67,6 +67,8 @@ static void broadcast_recv(struct broadcast_conn *c, const linkaddr_t *from)
     // RSSI
     signed int last_rssi = packetbuf_attr(PACKETBUF_ATTR_RSSI);
     signed int total_rssi = b_recv.rssi_p + last_rssi;
+    
+    //random_init(last_rssi);
 
     printf("RSSI from NODE ID %d = %d. T RSSI=%d\n", b_recv.id.u8[0], b_recv.rssi_p, total_rssi);
 
@@ -104,19 +106,18 @@ static void broadcast_recv(struct broadcast_conn *c, const linkaddr_t *from)
 static void unicast_recv(struct unicast_conn *c, const linkaddr_t *from)
 {
   packetbuf_attr_t uc_type = packetbuf_attr(PACKETBUF_ATTR_UNICAST_TYPE); // Obtener el tipo de paquete
-
   void *msg = packetbuf_dataptr();
 
   if (uc_type == U_CONTROL_ATTR)
   {
-    printf("PKG TYPE CTRL\n");
+    //printf("PKG TYPE CTRL\n");
     char *rcv = (char *)msg; // leer mensaje  *((char *)msg)
 
     process_post(&update_routing_table, PROCESS_EVENT_CONTINUE, rcv);
   }
   else if (uc_type == U_DATA_ATTR)
   {
-    printf("PKG TYPE DATA\n");
+    //printf("PKG TYPE DATA\n");
     list_unicast_msg_st uc_recv_data = *((list_unicast_msg_st *)msg); // leer mensaje de datos como lista enlazada
 
     l = memb_alloc(&unicast_msg_mem);
@@ -124,7 +125,7 @@ static void unicast_recv(struct unicast_conn *c, const linkaddr_t *from)
     {
       list_add(unicast_msg_list, l);
       strcpy(l->tree_ch, uc_recv_data.tree_ch); // set message
-      // printf("PKG UNICAST R=%s", l->tree_ch);
+      printf("PKG UNICAST R=%s", uc_recv_data.tree_ch); //l->tree_ch
     }
 
     process_post(&routing, PROCESS_EVENT_CONTINUE, NULL);
@@ -185,23 +186,22 @@ PROCESS_THREAD(send_beacon, ev, data)
   }
 
   tree_node = new_node(linkaddr_node_addr.u8[0]);
+  random_init(linkaddr_node_addr.u8[0]+1);
+  //printf("rand %d",random_rand()+200);
 
   while (1)
   {
     /* Delay 2-4 seconds */
-    etimer_set(&et, CLOCK_SECOND * 4 + random_rand() % (CLOCK_SECOND * 4) - 300); // 1 3
-
+    etimer_set(&et, CLOCK_SECOND * 4 + random_rand() % (CLOCK_SECOND * 4)); // 1 3
     PROCESS_WAIT_EVENT_UNTIL(etimer_expired(&et));
 
     // printf("n.preferred_parent.u8 %d\n", n.preferred_parent.u8[0]);
     // printf("TX n.rssi_p %d\n", n.rssi_p);
 
     llenar_beacon(&b, linkaddr_node_addr, n.rssi_p);
-
     packetbuf_copyfrom(&b, sizeof(beacon_st));
     broadcast_send(&broadcast);
   }
-
   PROCESS_END();
 }
 
@@ -266,7 +266,7 @@ PROCESS_THREAD(send_routing_table, ev, data)
 
   unicast_open(&unicast, 146, &unicast_callbacks);
 
-  etimer_set(&wait, CLOCK_SECOND * STABLE_TIME);
+  etimer_set(&wait, CLOCK_SECOND * STABLE_TIME_SEND_ROUTING);
   PROCESS_WAIT_EVENT_UNTIL(etimer_expired(&wait));
 
   while (1)
@@ -275,19 +275,20 @@ PROCESS_THREAD(send_routing_table, ev, data)
     PROCESS_WAIT_EVENT_UNTIL(etimer_expired(&et));
 
     serialize(tree_node, n.tree_ch); // Serializar arbol
-    printf("SERIAL=%s\n", n.tree_ch);
-
-    packetbuf_copyfrom(&n.tree_ch, strlen(n.tree_ch)); // enviar arbol codificado
+    // printf("SERIAL=%s\n", n.tree_ch);
 
     if (!linkaddr_cmp(&n.preferred_parent, &linkaddr_null))
     {
-    packetbuf_set_attr(PACKETBUF_ATTR_UNICAST_TYPE, U_CONTROL_ATTR);
-    if (unicast_send(&unicast, &n.preferred_parent))
-    {
-      printf("ENVIO UNICAST=%s\n", n.tree_ch);
+      packetbuf_copyfrom(&n.tree_ch, strlen(n.tree_ch)); // enviar arbol codificado
+      packetbuf_set_attr(PACKETBUF_ATTR_UNICAST_TYPE, U_CONTROL_ATTR);
+      /*
+      if (unicast_send(&unicast, &n.preferred_parent))
+      {
+        printf("ENVIO UNICAST=%s\n", n.tree_ch);
+      }
+      */
+      unicast_send(&unicast, &n.preferred_parent);
     }
-    // unicast_send(&unicast, &n.preferred_parent);
-     }
   }
   PROCESS_END();
 }
@@ -305,9 +306,9 @@ PROCESS_THREAD(update_routing_table, ev, data)
     deserialize(tree_node, rcv); // Deserializar arbol
     ptr = 0;                     // reset ptr deserializer
     //------------
-    char serial_test[128]; // Verificar que la deserializacion sea correcta
-    serialize(tree_node, serial_test);
-    printf("ENRU ACT=%s\n", serial_test);
+    //char serial_test[128]; // Verificar que la deserializacion sea correcta
+    serialize(tree_node, n.tree_ch);
+    printf("ENRU ACT=%s\n", n.tree_ch);
     //------------
   }
   PROCESS_END();
@@ -319,13 +320,13 @@ PROCESS_THREAD(generate_pkg, ev, data)
 
   PROCESS_BEGIN();
 
-  etimer_set(&wait, CLOCK_SECOND * STABLE_TIME);
+  etimer_set(&wait, CLOCK_SECOND * STABLE_TIME_SEND_PKG);
   PROCESS_WAIT_EVENT_UNTIL(etimer_expired(&wait));
 
   while (1)
   {
     etimer_set(&et, CLOCK_SECOND * 4 + random_rand() % (CLOCK_SECOND * 4));
-
+    
     PROCESS_WAIT_EVENT_UNTIL(etimer_expired(&et));
 
     if (linkaddr_node_addr.u8[0] == ORIGIN)
@@ -335,7 +336,7 @@ PROCESS_THREAD(generate_pkg, ev, data)
       {
         list_add(unicast_msg_list, l);
         strcpy(l->tree_ch, "Datos"); // set message
-        printf("MSG=%s\n", l->tree_ch);
+        // printf("MSG=%s\n", l->tree_ch);
       }
       process_post(&routing, PROCESS_EVENT_CONTINUE, NULL);
       // printf("Paquete generado\n");
@@ -361,19 +362,21 @@ PROCESS_THREAD(routing, ev, data)
     PROCESS_YIELD();
 
     send_to = search_forwarder(tree_node, DEST);
+    printf("ENVIAR A =%d\n", send_to);
 
-    node_dest.u8[1] = (unsigned char)send_to;
+    node_dest.u8[0] = (unsigned char)send_to;//
+    node_dest.u8[1] = 0;
 
     printf("#A color=orange\n"); // orange
 
-    for (l = list_head(unicast_msg_list); l != NULL; l = l->next)
+    for (l = list_head(unicast_msg_list); l != NULL; l = list_item_next(l))
     {
       packetbuf_copyfrom(&l, sizeof(list_unicast_msg_st));
       packetbuf_set_attr(PACKETBUF_ATTR_UNICAST_TYPE, U_DATA_ATTR);
 
       if (linkaddr_node_addr.u8[0] == DEST)
       {
-        printf("MSG Recived =%s\n", l->tree_ch);
+        printf("MSG Recived =%s\n", l->tree_ch);        
         break;
       }
       else

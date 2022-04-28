@@ -22,15 +22,16 @@
  ******************************************************************************/
 #define NEG_INF           -999
 //#define RSSI_NODO_PERDIDO -400
-#define PARENT_TIMEOUT  60 * CLOCK_SECOND
+#define PARENT_TIMEOUT  40 * CLOCK_SECOND
 
-#define STABLE_TIME 10 //sec
+#define STABLE_TIME_SEND_ROUTING  20 //sec 12
+#define STABLE_TIME_SEND_PKG      30 //sec 12
 
 #define U_DATA_ATTR     0x01
 #define U_CONTROL_ATTR  0x02
 
-#define ORIGIN  9
-#define DEST    20
+#define ORIGIN  7
+#define DEST    12
 /*******************************************************************************
  * Variables
  ******************************************************************************/
